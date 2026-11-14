@@ -1,5 +1,6 @@
 #include <err.h>
 #include <signal.h>
+#include <sys/procctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <filesystem>
@@ -94,6 +95,13 @@ process::process(const json& process_json,
         uid_ = 0;
         gid_ = 0;
         gids_.push_back(0);
+    }
+
+    if (process_json.contains("noNewPrivileges")) {
+        if (!process_json["noNewPrivileges"].is_boolean()) {
+            malformed_config("process.noNewPrivileges must be a boolean");
+        }
+        no_new_privs_ = process_json["noNewPrivileges"];
     }
 
     if (process_json.contains("env")) {
@@ -268,6 +276,21 @@ void process::set_uid_gid() {
     }
 }
 
+void process::set_no_new_privs() {
+#ifdef PROC_NO_NEW_PRIVS_CTL
+    int arg = PROC_NO_NEW_PRIVS_ENABLE;
+    if (::procctl(P_PID, ::getpid(), PROC_NO_NEW_PRIVS_CTL, &arg) < 0) {
+        throw std::system_error{errno,
+                                std::system_category(),
+                                "error calling procctl(PROC_NO_NEW_PRIVS_CTL)"};
+    }
+#else
+    // Refuse rather than silently running without the requested restriction.
+    throw std::runtime_error{
+        "process.noNewPrivileges requires FreeBSD 14.0 or later"};
+#endif
+}
+
 void process::exec(int stdin_fd, int stdout_fd, int stderr_fd) {
     // Make sure that HOME is set and is not empty
     auto home = getenv("HOME");
@@ -300,6 +323,13 @@ void process::exec(int stdin_fd, int stdout_fd, int stderr_fd) {
 
     // Set the uid, gid etc.
     set_uid_gid();
+
+    // process.noNewPrivileges: setuid/setgid bits and other privilege
+    // granting mechanisms are ignored by execve from here on. The flag is
+    // inherited by all descendants and cannot be cleared.
+    if (no_new_privs_) {
+        set_no_new_privs();
+    }
 
     // Setup stdin, stdout and stderr. Close everything else.
     if (stdin_fd != 0) {
