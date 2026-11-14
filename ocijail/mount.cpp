@@ -505,11 +505,69 @@ static void unmount_volume(main_app& app,
     }
 }
 
+// File mounts below a devfs mount (e.g. a Kubernetes terminationMessagePath of
+// /dev/termination-custom-log) cannot work directly: devfs cannot hold the
+// regular file we need as a mount point. Mount such files under
+// /.ocijail-devfiles in the container root instead and, once everything is
+// mounted, point a symlink in the devfs at them (devfs allows symlinks).
+// The rewrite is a pure function of the mount list so that create and delete
+// agree on the destinations.
+static const fs::path devfiles_dir{"/.ocijail-devfiles"};
+
+static bool is_file_bind_mount(const json& mount) {
+    std::string type = mount.contains("type") ? mount["type"] : "nullfs";
+    return (type == "nullfs" || type == "bind") && mount.contains("source") &&
+           fs::is_regular_file(mount["source"].get<std::string>());
+}
+
+static json redirect_devfs_file_mounts(
+    const json& mounts,
+    std::vector<std::pair<fs::path, fs::path>>* links = nullptr) {
+    if (!mounts.is_array()) {
+        return mounts;
+    }
+    std::vector<fs::path> devfs_dirs;
+    for (auto& m : mounts) {
+        if (m.contains("type") && m["type"] == "devfs" &&
+            m.contains("destination")) {
+            devfs_dirs.emplace_back(m["destination"].get<std::string>());
+        }
+    }
+    json res = mounts;
+    for (auto& m : res) {
+        if (!m.contains("destination") || !is_file_bind_mount(m)) {
+            continue;
+        }
+        fs::path dest{m["destination"].get<std::string>()};
+        for (auto& dev : devfs_dirs) {
+            auto rel = dest.lexically_relative(dev);
+            if (rel.empty() || *rel.begin() == "..") {
+                continue;
+            }
+            std::string flat = dest.relative_path().string();
+            for (auto& c : flat) {
+                if (c == '/') {
+                    c = '_';
+                }
+            }
+            auto redirected = devfiles_dir / flat;
+            m["destination"] = redirected.string();
+            if (links) {
+                links->emplace_back(dest, redirected);
+            }
+            break;
+        }
+    }
+    return res;
+}
+
 void mount_volumes(main_app& app,
                    runtime_state& state,
                    const fs::path& root_path,
                    bool prepare_only,
-                   const json& mounts) {
+                   const json& config_mounts) {
+    std::vector<std::pair<fs::path, fs::path>> devfs_links;
+    const json mounts = redirect_devfs_file_mounts(config_mounts, &devfs_links);
     bool file_mount_supported = true;
     std::size_t mounted = 0;
 
@@ -530,6 +588,17 @@ void mount_volumes(main_app& app,
             state["file_mount_supported"] = file_mount_supported;
             mounted++;
         }
+        // Now that the devfs is mounted, link the redirected file mounts
+        // into it.
+        if (!prepare_only) {
+            for (auto& [dest, target] : devfs_links) {
+                auto link = root_path / dest.relative_path();
+                if (fs::is_symlink(link)) {
+                    fs::remove(link);
+                }
+                fs::create_symlink(target, link);
+            }
+        }
     } catch (const std::exception& e) {
         // Attempt to clean up whatever we managed to mount
         try {
@@ -543,8 +612,9 @@ void mount_volumes(main_app& app,
 void unmount_volumes(main_app& app,
                      runtime_state& state,
                      const fs::path& root_path,
-                     const json& mounts,
+                     const json& config_mounts,
                      std::optional<std::size_t> mounted) {
+    const json mounts = redirect_devfs_file_mounts(config_mounts);
     bool file_mount_supported = true;
     if (state.contains("file_mount_supported")) {
         file_mount_supported = state["file_mount_supported"];
