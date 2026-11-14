@@ -264,6 +264,33 @@ class test_run(unittest.TestCase):
             with open(os.path.join(root_dir, "file"), "r") as f:
                 self.assertEqual(f.read(), "Hello World\n")
 
+    def test_devfs_file_mount(self):
+        # A file bind-mounted below a devfs mount, like Kubernetes'
+        # terminationMessagePath: /dev/termination-custom-log. devfs cannot
+        # hold the regular file a mount point needs, so ocijail mounts it
+        # elsewhere and links it into /dev; writes must reach the host file.
+        with tempfile.TemporaryDirectory() as root_dir, \
+             tempfile.NamedTemporaryFile(mode="r") as msg:
+            shutil.copytree("/rescue", os.path.join(root_dir, "rescue"))
+            os.mkdir(os.path.join(root_dir, "dev"))
+            c = self.config()
+            c["root"]["path"] = root_dir
+            c["mounts"] = [
+                {"destination": "/dev", "type": "devfs", "source": "devfs"},
+                {"destination": "/dev/termination-custom-log",
+                 "type": "nullfs", "source": msg.name},
+            ]
+            c["process"]["args"] = [
+                "sh", "-c", "echo -n DONE > /dev/termination-custom-log"]
+            c["process"]["env"] = ["PATH=/rescue"]
+            ret, _, _ = self.run_with_config(c)
+            self.assertEqual(ret, 0)
+            self.assertEqual(msg.read(), "DONE")
+            self.delete()
+            # nothing left behind in the container root
+            self.assertFalse(
+                os.path.exists(os.path.join(root_dir, ".ocijail-devfiles")))
+
     def test_process_user_umask(self):
         c = self.config()
         # If process.user.umask is set, this should be the value of umask inside
