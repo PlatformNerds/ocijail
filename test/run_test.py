@@ -276,17 +276,23 @@ class test_run(unittest.TestCase):
             c = self.config()
             c["root"]["path"] = root_dir
             c["mounts"] = [
-                {"destination": "/dev", "type": "devfs", "source": "devfs"},
+                # ruleset 4 (devfsrules_jail) hides everything not
+                # unhidden, as CRI-O and podman use for containers
+                {"destination": "/dev", "type": "devfs", "source": "devfs",
+                 "options": ["ruleset=4"]},
                 {"destination": "/dev/termination-custom-log",
                  "type": "nullfs", "source": msg.name},
             ]
             c["process"]["args"] = [
                 "sh", "-c", "echo -n DONE > /dev/termination-custom-log"]
             c["process"]["env"] = ["PATH=/rescue"]
-            ret, _, _ = self.run_with_config(c)
-            self.assertEqual(ret, 0)
-            self.assertEqual(msg.read(), "DONE")
-            self.delete()
+            try:
+                ret, _, _ = self.run_with_config(c)
+                self.assertEqual(ret, 0)
+                self.assertEqual(msg.read(), "DONE")
+            finally:
+                # unmount (devfs, file mount) before root_dir is removed
+                self.delete(False)
             # nothing left behind in the container root
             self.assertFalse(
                 os.path.exists(os.path.join(root_dir, ".ocijail-devfiles")))
