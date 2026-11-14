@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <iostream>
 #include <optional>
+#include <tuple>
 
 #include "ocijail/main.h"
 #include "ocijail/mount.h"
@@ -522,7 +523,7 @@ static bool is_file_bind_mount(const json& mount) {
 
 static json redirect_devfs_file_mounts(
     const json& mounts,
-    std::vector<std::pair<fs::path, fs::path>>* links = nullptr) {
+    std::vector<std::tuple<fs::path, fs::path, fs::path>>* links = nullptr) {
     if (!mounts.is_array()) {
         return mounts;
     }
@@ -553,7 +554,7 @@ static json redirect_devfs_file_mounts(
             auto redirected = devfiles_dir / flat;
             m["destination"] = redirected.string();
             if (links) {
-                links->emplace_back(dest, redirected);
+                links->emplace_back(dest, redirected, dev);
             }
             break;
         }
@@ -566,7 +567,7 @@ void mount_volumes(main_app& app,
                    const fs::path& root_path,
                    bool prepare_only,
                    const json& config_mounts) {
-    std::vector<std::pair<fs::path, fs::path>> devfs_links;
+    std::vector<std::tuple<fs::path, fs::path, fs::path>> devfs_links;
     const json mounts = redirect_devfs_file_mounts(config_mounts, &devfs_links);
     bool file_mount_supported = true;
     std::size_t mounted = 0;
@@ -589,14 +590,20 @@ void mount_volumes(main_app& app,
             mounted++;
         }
         // Now that the devfs is mounted, link the redirected file mounts
-        // into it.
+        // into it. The devfs usually has a ruleset that hides everything
+        // not explicitly unhidden (e.g. devfsrules_jail), which also hides
+        // new symlinks, so unhide each one.
         if (!prepare_only) {
-            for (auto& [dest, target] : devfs_links) {
+            for (auto& [dest, target, devdir] : devfs_links) {
                 auto link = root_path / dest.relative_path();
                 if (fs::is_symlink(link)) {
                     fs::remove(link);
                 }
                 fs::create_symlink(target, link);
+                apply_devfs_rule(root_path / devdir.relative_path(),
+                                 "path " +
+                                     dest.lexically_relative(devdir).string() +
+                                     " unhide");
             }
         }
     } catch (const std::exception& e) {
