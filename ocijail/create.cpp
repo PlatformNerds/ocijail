@@ -279,6 +279,7 @@ void create::run() {
             "allow.mount.fdescfs", "allow.mount.nullfs",
             "allow.mount.procfs",  "allow.mount.tmpfs",
             "allow.mount.zfs",     "allow.nfsd",
+            "allow.pf",
             "allow.quotas",        "allow.raw_sockets",
             "allow.read_msgbuf",   "allow.reserved_ports",
             "allow.routing",       "allow.set_hostname",
