@@ -31,6 +31,7 @@ struct process {
    private:
     void reset_signals();
     void set_uid_gid();
+    void set_no_new_privs();
 
     std::optional<std::filesystem::path> console_socket_;
     bool detach_;
@@ -45,6 +46,7 @@ struct process {
     gid_t gid_;
     std::optional<mode_t> umask_;
     bool terminal_{false};
+    bool no_new_privs_{false};
 };
 
 }  // namespace ocijail

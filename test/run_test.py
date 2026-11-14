@@ -139,6 +139,44 @@ class test_run(unittest.TestCase):
         ret, _, _ = self.run_with_config(c)
         self.assertEqual(ret, 42)
 
+    def suid_scratch(self):
+        # A scratch directory on a filesystem that honours setuid bits (/tmp
+        # is often nosuid, e.g. in the default ZFS layout).
+        scratch = tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(__file__)))
+        if os.statvfs(scratch.name).f_flag & os.ST_NOSUID:
+            scratch.cleanup()
+            self.skipTest("test directory is on a nosuid filesystem")
+        return scratch
+
+    def setuid_id(self, scratch):
+        # A setuid-root copy of id(1): run as nobody, it reports euid 0
+        # unless no_new_privs is in effect.
+        path = os.path.join(scratch, "id")
+        shutil.copy("/usr/bin/id", path)
+        os.chown(path, 0, 0)
+        os.chmod(path, 0o4755)
+        os.chmod(scratch, 0o755)
+        return path
+
+    def test_no_new_privs(self):
+        with self.suid_scratch() as scratch:
+            c = self.config()
+            c["process"]["user"] = {"uid": 65534, "gid": 65534}
+            c["process"]["noNewPrivileges"] = True
+            c["process"]["args"] = [self.setuid_id(scratch), "-u"]
+            ret, out, _ = self.run_with_config(c)
+            self.assertEqual(ret, 0)
+            self.assertEqual(out.strip(), "65534")
+
+    def test_no_new_privs_unset(self):
+        with self.suid_scratch() as scratch:
+            c = self.config()
+            c["process"]["user"] = {"uid": 65534, "gid": 65534}
+            c["process"]["args"] = [self.setuid_id(scratch), "-u"]
+            ret, out, _ = self.run_with_config(c)
+            self.assertEqual(ret, 0)
+            self.assertEqual(out.strip(), "0")
+
     def test_stdout(self):
         c = self.config()
         c["process"]["args"] = ["echo", "Hello", "World"]
