@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 def racct_enabled():
@@ -176,6 +177,61 @@ class test_run(unittest.TestCase):
             os.waitpid(pid, os.WEXITED)
             stdout.close()
             stderr.close()
+            self.delete()
+        self.assertEqual(rctl_rules(subject), [])
+
+    def update(self, resources):
+        return subprocess.run([cmd, "update", "--resources", "-", self.container_id],
+                              input=json.dumps(resources), text=True,
+                              capture_output=True)
+
+    @unittest.skipUnless(racct_enabled(), "needs kern.racct.enable=1")
+    def test_update_resources(self):
+        # update --resources (CRI UpdateContainerResources, i.e. in-place
+        # pod resize) replaces the jail's rctl rules; partial updates keep
+        # the other limits; a memory limit below current usage is refused.
+        c = self.config()
+        c["process"]["args"] = ["sh", "-c", "exit 0"]
+        c["linux"] = {"resources": {
+            "memory": {"limit": 64 << 20},
+            "cpu": {"quota": 50000, "period": 100000, "shares": 512},
+            "pids": {"limit": 100},
+        }}
+        subject = f"jail:{self.container_id}"
+        with tempfile.TemporaryDirectory() as bundle_dir:
+            with open(os.path.join(bundle_dir, "config.json"), "w") as f:
+                json.dump(c, f)
+            pid, stdout, stderr = self.create(bundle_dir)
+            # what CRI-O sends for a memory-only resize
+            ret = self.update({"cpu": {}, "memory": {"limit": 128 << 20}})
+            self.assertEqual(ret.returncode, 0, ret.stderr)
+            self.assertEqual(rctl_rules(subject), sorted([
+                f"{subject}:maxproc:deny=100",
+                f"{subject}:memoryuse:sigkill=134217728",
+                f"{subject}:pcpu:deny=50",
+            ]))
+            # cpu-only resize; the memory change above was persisted
+            ret = self.update({"cpu": {"quota": 150000, "period": 100000}, "memory": {}})
+            self.assertEqual(ret.returncode, 0, ret.stderr)
+            self.assertEqual(rctl_rules(subject), sorted([
+                f"{subject}:maxproc:deny=100",
+                f"{subject}:memoryuse:sigkill=134217728",
+                f"{subject}:pcpu:deny=150",
+            ]))
+            # below current usage: refused, rules unchanged (racctd samples
+            # memoryuse once per second, so wait for a sample first)
+            time.sleep(1.5)
+            ret = self.update({"memory": {"limit": 4096}})
+            self.assertNotEqual(ret.returncode, 0, rctl_rules(subject))
+            self.assertIn("below the container's current usage", ret.stderr)
+            self.assertIn(f"{subject}:memoryuse:sigkill=134217728", rctl_rules(subject))
+            self.start()
+            os.waitpid(pid, os.WEXITED)
+            stdout.close()
+            stderr.close()
+            # stopped containers can't be updated
+            ret = self.update({"memory": {"limit": 256 << 20}})
+            self.assertNotEqual(ret.returncode, 0)
             self.delete()
         self.assertEqual(rctl_rules(subject), [])
 

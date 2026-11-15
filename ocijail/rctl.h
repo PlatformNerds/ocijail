@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -36,6 +37,29 @@ struct translation {
     std::vector<std::string> ignored;
 };
 translation from_oci_resources(const nlohmann::json& resources);
+
+// Merge a partial OCI linux.resources update (as passed to `update
+// --resources`, like runc) into base: fields present and non-null in update
+// replace those in base, absent or null fields keep their current value.
+// Pure function.
+nlohmann::json merge_oci_resources(const nlohmann::json& base,
+                                   const nlohmann::json& update);
+
+// The rctl resource:action pairs ocijail manages (what from_oci_resources
+// can produce).
+extern const std::vector<std::string> managed_keys;
+
+// Replace the jail's managed rules with rules: for each managed
+// resource:action, remove the existing rule, then add the new one if any.
+// (rctl keeps rules with the same subject, resource and action side by side,
+// and the lowest wins, so adding alone cannot raise a limit.) Same return
+// value and errors as apply.
+bool replace(const std::string& jail_name, const std::vector<std::string>& rules);
+
+// Current usage of a racct resource (e.g. "memoryuse") for the jail, or
+// nullopt if RACCT is unavailable or the resource isn't reported.
+std::optional<std::int64_t> usage(const std::string& jail_name,
+                                  const std::string& resource);
 
 // Add "jail:<jail_name>:<rule>" for each rule. Returns false if RACCT/RCTL
 // is unavailable (kern.racct.enable=0 -> ENOSYS) or not permitted (EPERM,
