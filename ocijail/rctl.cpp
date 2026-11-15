@@ -5,7 +5,9 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <string_view>
 #include <system_error>
+#include <vector>
 
 using nlohmann::json;
 
@@ -60,6 +62,81 @@ translation from_oci_resources(const json& resources) {
     }
 
     return t;
+}
+
+json merge_oci_resources(const json& base, const json& update) {
+    json merged = base.is_object() ? base : json::object();
+    if (!update.is_object()) {
+        return merged;
+    }
+    for (auto& [key, value] : update.items()) {
+        if (value.is_null()) {
+            continue;
+        }
+        if (value.is_object() && merged.contains(key) && merged[key].is_object()) {
+            merged[key] = merge_oci_resources(merged[key], value);
+        } else if (value.is_object()) {
+            merged[key] = merge_oci_resources(json::object(), value);
+        } else {
+            merged[key] = value;
+        }
+    }
+    return merged;
+}
+
+const std::vector<std::string> managed_keys = {
+    "memoryuse:sigkill", "pcpu:deny", "maxproc:deny"};
+
+bool replace(const std::string& jail_name, const std::vector<std::string>& rules) {
+    for (const auto& key : managed_keys) {
+        auto filter = "jail:" + jail_name + ":" + key;
+        if (::rctl_remove_rule(filter.c_str(), filter.size() + 1, nullptr, 0) < 0) {
+            if (errno == ENOSYS || errno == EPERM) {
+                return false;
+            }
+            if (errno != ESRCH) {
+                throw std::system_error(
+                    errno, std::system_category(), "rctl_remove_rule " + filter);
+            }
+        }
+    }
+    return apply(jail_name, rules);
+}
+
+std::optional<std::int64_t> usage(const std::string& jail_name,
+                                  const std::string& resource) {
+    auto filter = "jail:" + jail_name;
+    std::vector<char> buf(4096);
+    for (;;) {
+        if (::rctl_get_racct(filter.c_str(), filter.size() + 1, buf.data(),
+                             buf.size()) == 0) {
+            break;
+        }
+        if (errno == ERANGE && buf.size() < (1 << 20)) {
+            buf.resize(buf.size() * 4);
+            continue;
+        }
+        return std::nullopt;
+    }
+    // "cputime=0,datasize=1234,...,memoryuse=45400064,..."
+    std::string_view s{buf.data()};
+    auto prefix = resource + "=";
+    for (size_t pos = 0; pos < s.size();) {
+        auto end = s.find(',', pos);
+        if (end == std::string_view::npos) {
+            end = s.size();
+        }
+        auto item = s.substr(pos, end - pos);
+        if (item.starts_with(prefix)) {
+            try {
+                return std::stoll(std::string{item.substr(prefix.size())});
+            } catch (...) {
+                return std::nullopt;
+            }
+        }
+        pos = end + 1;
+    }
+    return std::nullopt;
 }
 
 bool apply(const std::string& jail_name, const std::vector<std::string>& rules) {
