@@ -15,6 +15,7 @@
 #include "ocijail/hook.h"
 #include "ocijail/jail.h"
 #include "ocijail/rctl.h"
+#include "ocijail/sysctl.h"
 #include "ocijail/mount.h"
 #include "ocijail/process.h"
 #include "ocijail/tty.h"
@@ -464,6 +465,23 @@ void create::run() {
     }
 
     auto j = jail::create(jconf);
+
+    // Per-pod network sysctls: only for a jail with its own vnet (the pod
+    // sandbox), where the kernel scopes them to that vnet.
+    if (vnet == jail::NEW && config.contains("linux") &&
+        config["linux"].contains("sysctl")) {
+        auto t = sysctl::from_oci_sysctl(config["linux"]["sysctl"]);
+        for (const auto& ign : t.ignored) {
+            app_.log() << "warning: sysctl " << ign
+                       << " has no per-vnet FreeBSD equivalent, ignoring";
+        }
+        try {
+            sysctl::apply_in_jail(j.jid(), t);
+        } catch (...) {
+            j.remove();
+            throw;
+        }
+    }
 
     // Resource limits: translate OCI linux.resources into rctl rules on this
     // jail. Rules are keyed by jail name (not jid) and outlive the jail, so

@@ -35,6 +35,8 @@ cc_binary(
         "start.h",
         "state.cpp",
         "state.h",
+        "sysctl.cpp",
+        "sysctl.h",
         "tty.cpp",
         "tty.h",
         "update.cpp",
@@ -51,5 +53,12 @@ cc_test(
     name = "rctl_test",
     copts = ["-std=c++20"],
     srcs = ["rctl_test.cpp", "rctl.cpp", "rctl.h"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+cc_test(
+    name = "sysctl_test",
+    copts = ["-std=c++20"],
+    srcs = ["sysctl_test.cpp", "sysctl.cpp", "sysctl.h"],
     deps = ["@nlohmann_json//:json"],
 )
