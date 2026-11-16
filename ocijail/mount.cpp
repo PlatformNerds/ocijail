@@ -464,8 +464,13 @@ static void unmount_volume(main_app& app,
                            bool file_mount_supported,
                            runtime_state& state,
                            const fs::path& root_path,
-                           const json& mount) {
-    auto destination = resolve_container_path(app, root_path, mount);
+                           const json& mount,
+                           const json& recorded) {
+    // Prefer the path recorded at mount time (see mount_volumes); state
+    // written by older versions does not have it.
+    auto destination = recorded.is_string()
+                           ? fs::path{recorded.get<std::string>()}
+                           : resolve_container_path(app, root_path, mount);
 
     std::string type = mount.contains("type") ? mount["type"] : "nullfs";
     bool is_file_mount =
@@ -578,6 +583,20 @@ void mount_volumes(main_app& app,
     // json::type_error and silently do nothing at all.
     state["file_mount_supported"] = file_mount_supported;
 
+    // Record where each mount lands, resolved within the root, before
+    // mounting it. Unmounting must use the same path, and resolving it again
+    // later can give a different one: the runtime may have unmounted the
+    // container's root file system by then (CRI-O does so when the container
+    // stops), so a symlink on the path (e.g. /var/run -> ../run, in nearly
+    // every Linux image) no longer resolves, the computed path does not
+    // match the mount, unmount(2) fails with EINVAL and the mount leaks (and
+    // with it, the kubelet's volume, so the pod stays Terminating).
+    state["mount_points"] = json::array();
+    for (auto& mount : mounts) {
+        state["mount_points"].push_back(
+            resolve_container_path(app, root_path, mount).string());
+    }
+
     try {
         for (auto& mount : mounts) {
             file_mount_supported = mount_volume(app,
@@ -643,8 +662,19 @@ void unmount_volumes(main_app& app,
     std::exception_ptr eptr{nullptr};
     for (std::size_t i = count; i > 0; i--) {
         try {
-            unmount_volume(
-                app, file_mount_supported, state, root_path, mounts[i - 1]);
+            const json none;
+            const json& recorded =
+                state.contains("mount_points") &&
+                        state["mount_points"].is_array() &&
+                        state["mount_points"].size() == mounts.size()
+                    ? state["mount_points"][i - 1]
+                    : none;
+            unmount_volume(app,
+                           file_mount_supported,
+                           state,
+                           root_path,
+                           mounts[i - 1],
+                           recorded);
         } catch (const std::exception&) {
             if (!eptr) {
                 eptr = std::current_exception();
