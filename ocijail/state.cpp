@@ -3,6 +3,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include "delete.h"
 #include "state.h"
 
 namespace fs = std::filesystem;
@@ -30,6 +31,18 @@ void state::run() {
 
     // update state
     state.check_status();
+
+    // Once stopped, release the container's jail and volumes right away
+    // (see release_stopped_container). Failing here must not hide the state:
+    // the release is retried on the next query and by delete.
+    if (state["status"] == "stopped") {
+        try {
+            release_stopped_container(app_, state);
+        } catch (const std::exception& e) {
+            app_.log() << "releasing stopped container " << id_ << ": "
+                       << e.what();
+        }
+    }
 
     std::cout << state.report();
 }

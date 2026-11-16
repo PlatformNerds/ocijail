@@ -30,6 +30,28 @@ delete_::delete_(main_app& app) : app_(app) {
     sub->final_callback([this] { run(); });
 }
 
+static fs::path container_root(runtime_state& state) {
+    if (state.contains("root_readonly") && state["root_readonly"] == true) {
+        return fs::path{state["readonly_root_path"]};
+    }
+    return fs::path{state["root_path"]};
+}
+
+void release_stopped_container(main_app& app, runtime_state& state) {
+    if (state.contains("released") && state["released"] == true) {
+        return;
+    }
+    auto j = jail::find(int(state["jid"]));
+    j.remove();
+    if (state["config"].contains("mounts") &&
+        !state["config"]["mounts"].is_null()) {
+        unmount_volumes(
+            app, state, container_root(state), state["config"]["mounts"]);
+    }
+    state["released"] = true;
+    state.save();
+}
+
 void delete_::run() {
     auto state = app_.get_runtime_state(id_);
 
@@ -70,8 +92,7 @@ void delete_::run() {
         throw std::runtime_error(ss.str());
     }
 
-    auto j = jail::find(int(state["jid"]));
-    j.remove();
+    release_stopped_container(app_, state);
     if (auto& jail_name = state["jail_name"]; jail_name.is_string()) {
         rctl::remove(jail_name.get<std::string>());
     }
@@ -80,14 +101,7 @@ void delete_::run() {
     if (state.contains("root_readonly")) {
         root_readonly = state["root_readonly"];
     }
-    fs::path root_path = state["root_path"];
-    if (root_readonly) {
-        root_path = fs::path{state["readonly_root_path"]};
-    }
-    if (state["config"].contains("mounts") &&
-        !state["config"]["mounts"].is_null()) {
-        unmount_volumes(app_, state, root_path, state["config"]["mounts"]);
-    }
+    fs::path root_path = container_root(state);
     if (root_readonly) {
         if (::unmount(root_path.c_str(), MNT_FORCE) > 0) {
             throw std::system_error{errno,
