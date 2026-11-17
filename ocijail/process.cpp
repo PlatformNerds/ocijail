@@ -113,7 +113,7 @@ process::process(const json& process_json,
             if (!arg.is_string()) {
                 malformed_config("process.env must be an array of strings");
             }
-            env_.push_back(arg.get<std::string>());
+            add_env(arg.get<std::string>());
         }
     }
 
@@ -154,6 +154,19 @@ std::optional<std::string_view> process::getenv(std::string_view key) {
         }
     }
     return std::nullopt;
+}
+
+void process::add_env(std::string keyval) {
+    std::string_view kv{keyval};
+    auto key = kv.substr(0, kv.find('='));
+    for (auto& env : env_) {
+        std::string_view envv{env};
+        if (envv.substr(0, envv.find('=')) == key) {
+            env = std::move(keyval);
+            return;
+        }
+    }
+    env_.push_back(std::move(keyval));
 }
 
 void process::setenv(std::string_view key, std::string_view val) {
