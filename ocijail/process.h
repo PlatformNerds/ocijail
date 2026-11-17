@@ -31,6 +31,10 @@ struct process {
    private:
     void reset_signals();
     void set_uid_gid();
+    // Add a KEY=value entry to env_. A later entry for the same KEY
+    // replaces the earlier value in place, which matches runc (it
+    // applies process.env with setenv in order).
+    void add_env(std::string keyval);
 
     std::optional<std::filesystem::path> console_socket_;
     bool detach_;

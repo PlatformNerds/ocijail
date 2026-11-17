@@ -313,6 +313,20 @@ class test_run(unittest.TestCase):
             self.assertEqual(ret, 0)
             self.assertEqual(out, "Hello World\n")
 
+    def test_validate_command_duplicate_path(self):
+        # CRI-O (via runtime-tools) can emit PATH twice: its default
+        # first, then the image's. Like runc, the last entry must win.
+        with tempfile.TemporaryDirectory() as root_dir:
+            random_dir = secrets.token_urlsafe(8)
+            shutil.copytree("/rescue", os.path.join(root_dir, random_dir))
+            c = self.config()
+            c["root"]["path"] = root_dir
+            c["process"]["args"] = ["echo", "Hello World"]
+            c["process"]["env"] = ["PATH=/nonexistent", "FOO=1", f"PATH=/{random_dir}"]
+            ret, out, _ = self.run_with_config(c)
+            self.assertEqual(ret, 0)
+            self.assertEqual(out, "Hello World\n")
+
     def test_validate_command_abs(self):
         with tempfile.TemporaryDirectory() as root_dir:
             random_dir = secrets.token_urlsafe(8)
