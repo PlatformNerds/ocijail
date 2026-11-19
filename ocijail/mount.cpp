@@ -534,11 +534,14 @@ static void unmount_volume(main_app& app,
                            ? fs::path{recorded.get<std::string>()}
                            : resolve_container_path(app, root_path, mount);
 
+    // Whether the source is a file only matters without file mount support.
+    // Don't stat it otherwise: for an NFS volume whose server is gone, stat(2)
+    // blocks for good, and the container could never be torn down.
     std::string type = mount.contains("type") ? mount["type"] : "nullfs";
-    bool is_file_mount =
-        type == "nullfs" && fs::is_regular_file(mount["source"]);
+    bool is_file_mount = !file_mount_supported && type == "nullfs" &&
+                         fs::is_regular_file(mount["source"]);
 
-    if (is_file_mount && !file_mount_supported) {
+    if (is_file_mount) {
         // Restore the saved path if it exists
         auto [_, save_path] = get_save_path(state, destination);
         if (fs::exists(save_path)) {
@@ -603,7 +606,7 @@ static json redirect_devfs_file_mounts(
     }
     json res = mounts;
     for (auto& m : res) {
-        if (!m.contains("destination") || !is_file_bind_mount(m)) {
+        if (!m.contains("destination")) {
             continue;
         }
         fs::path dest{m["destination"].get<std::string>()};
@@ -611,6 +614,12 @@ static json redirect_devfs_file_mounts(
             auto rel = dest.lexically_relative(dev);
             if (rel.empty() || *rel.begin() == "..") {
                 continue;
+            }
+            // Only now look at the source: stat(2) on it can block for good
+            // (an NFS volume whose server is gone), and teardown runs this
+            // for every mount.
+            if (!is_file_bind_mount(m)) {
+                break;
             }
             std::string flat = dest.relative_path().string();
             for (auto& c : flat) {
