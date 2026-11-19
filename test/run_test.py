@@ -416,7 +416,7 @@ class test_run(unittest.TestCase):
             p = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             p.bind(probe)
             p.close()
-            if subprocess.run(["mount", "-t", "nullfs", src, probe],
+            if subprocess.run(["mount_nullfs", src, probe],
                               capture_output=True).returncode != 0:
                 srv.close()
                 self.skipTest("nullfs cannot mount unix sockets here")
