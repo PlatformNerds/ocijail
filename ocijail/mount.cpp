@@ -1,7 +1,11 @@
 #include <sys/param.h>
 
+#include <fcntl.h>
 #include <spawn.h>
+#include <unistd.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <iostream>
@@ -317,13 +321,55 @@ int do_mount(
     return nmount(&iov[0], iov.size(), mount_flags | MNT_IGNORE);
 }
 
+// Create a unix(4) socket node at path to mount a socket over: nullfs mounts
+// a socket only on top of another socket. bindat(2) relative to the parent
+// directory, since a container path can be longer than sun_path.
+static void create_socket_node(const fs::path& path) {
+    int dfd = ::open(path.parent_path().c_str(), O_DIRECTORY | O_CLOEXEC);
+    if (dfd < 0) {
+        throw std::system_error(errno, std::system_category(),
+                                "opening " + path.parent_path().string());
+    }
+    int s = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) {
+        auto e = errno;
+        ::close(dfd);
+        throw std::system_error(e, std::system_category(), "socket");
+    }
+    sockaddr_un sun{};
+    sun.sun_family = AF_UNIX;
+    auto name = path.filename().string();
+    if (name.size() >= sizeof(sun.sun_path)) {
+        ::close(s);
+        ::close(dfd);
+        throw std::runtime_error("socket mount point name too long: " + name);
+    }
+    name.copy(sun.sun_path, name.size());
+    sun.sun_len = SUN_LEN(&sun);
+    int r = ::bindat(dfd, s, reinterpret_cast<sockaddr*>(&sun), sun.sun_len);
+    auto e = errno;
+    ::close(s);
+    ::close(dfd);
+    if (r < 0) {
+        throw std::system_error(e, std::system_category(),
+                                "creating socket mount point " + path.string());
+    }
+}
+
 static bool create_mount_point(runtime_state& state,
                                const fs::path& root_path,
                                const fs::path& destination,
-                               bool is_file_mount) {
+                               bool is_file_mount,
+                               bool is_socket_mount = false) {
     auto destination_exists = fs::exists(destination);
     if (destination_exists) {
-        if (is_file_mount) {
+        if (is_socket_mount) {
+            if (!fs::is_socket(destination)) {
+                throw std::runtime_error(
+                    "destination for socket mount exists and is not a "
+                    "socket");
+            }
+        } else if (is_file_mount) {
             if (!fs::is_regular_file(destination)) {
                 throw std::runtime_error(
                     "destination for file mount exists and is not a file");
@@ -336,7 +382,11 @@ static bool create_mount_point(runtime_state& state,
             }
         }
     } else {
-        if (is_file_mount) {
+        if (is_socket_mount) {
+            state["remove_on_unmount"].push_back(destination);
+            create_directories(root_path, destination.parent_path(), state);
+            create_socket_node(destination);
+        } else if (is_file_mount) {
             // Create parent directories if necessary and create an
             // empty file to mount over
             state["remove_on_unmount"].push_back(destination);
@@ -369,6 +419,10 @@ static bool mount_volume(main_app& app,
     }
     bool is_file_mount =
         type == "nullfs" && fs::is_regular_file(mount["source"]);
+    // A unix(4) socket (e.g. a host path to a daemon's socket): nullfs mounts
+    // it over a socket node (FreeBSD 15.1 needs the backport of 2c68ad49f13d).
+    bool is_socket_mount =
+        type == "nullfs" && fs::is_socket(mount["source"].get<std::string>());
 
     // Validate mount options before we perform any actions
     std::vector<std::tuple<pseudo_option*, std::string>> pseudo_opts;
@@ -406,7 +460,8 @@ static bool mount_volume(main_app& app,
     }
 
     auto destination_exists =
-        create_mount_point(state, root_path, destination, is_file_mount);
+        create_mount_point(
+            state, root_path, destination, is_file_mount, is_socket_mount);
 
     if (prepare_only) {
         return file_mount_supported;
@@ -436,6 +491,13 @@ retry:
             if (is_file_mount && errno == ENOTDIR) {
                 file_mount_supported = false;
                 goto retry;
+            }
+            if (is_socket_mount && errno == EINVAL) {
+                throw std::runtime_error(
+                    "mounting socket " +
+                    mount["source"].get<std::string>() +
+                    ": this kernel's nullfs cannot mount unix sockets "
+                    "(FreeBSD main 2c68ad49f13d)");
             }
             std::stringstream ss;
             ss << mount;

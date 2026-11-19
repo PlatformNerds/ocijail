@@ -390,6 +390,55 @@ class test_run(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(os.path.join(root_dir, ".ocijail-devfiles")))
 
+    def test_socket_mount(self):
+        # A unix(4) socket bind-mounted into the container, like a
+        # Kubernetes hostPath to a daemon's socket: ocijail creates a socket
+        # node to mount over, and connections reach the host listener.
+        import threading
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            src = os.path.join(d, "s")
+            dst = os.path.join(d, "in", "agent.sock")
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(src)
+            srv.listen(1)
+            srv.settimeout(20)
+
+            def serve():
+                try:
+                    conn, _ = srv.accept()
+                    conn.sendall(b"hello")
+                    conn.close()
+                except OSError:
+                    pass
+            # Skip where nullfs can't mount sockets (FreeBSD before
+            # 2c68ad49f13d): probe with mount_nullfs(8) on a socket node.
+            probe = os.path.join(d, "probe")
+            p = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            p.bind(probe)
+            p.close()
+            if subprocess.run(["mount", "-t", "nullfs", src, probe],
+                              capture_output=True).returncode != 0:
+                srv.close()
+                self.skipTest("nullfs cannot mount unix sockets here")
+            subprocess.run(["umount", probe], check=True)
+            t = threading.Thread(target=serve)
+            t.start()
+            c = self.config()
+            c["mounts"] = [
+                {"destination": dst, "type": "nullfs", "source": src},
+            ]
+            c["process"]["args"] = ["/usr/bin/nc", "-U", dst]
+            try:
+                ret, out, err = self.run_with_config(c)
+                self.assertEqual(ret, 0, err)
+                self.assertEqual(out, "hello")
+            finally:
+                self.delete(False)
+                srv.close()
+                t.join()
+            # the socket node ocijail created is gone
+            self.assertFalse(os.path.exists(dst))
+
     def test_process_user_umask(self):
         c = self.config()
         # If process.user.umask is set, this should be the value of umask inside
