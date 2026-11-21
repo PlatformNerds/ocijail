@@ -275,7 +275,8 @@ void create::run() {
         // final authority and will reject any parameter it does not recognise.
         static const std::unordered_set<std::string> known_allow_params = {
             "allow.adjtime",       "allow.chflags",
-            "allow.extattr",       "allow.mlock",
+            "allow.extattr",       "allow.mknod",
+            "allow.mlock",
             "allow.mount",         "allow.mount.devfs",
             "allow.mount.fdescfs", "allow.mount.nullfs",
             "allow.mount.procfs",  "allow.mount.tmpfs",
