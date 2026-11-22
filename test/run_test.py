@@ -439,6 +439,61 @@ class test_run(unittest.TestCase):
             # the socket node ocijail created is gone
             self.assertFalse(os.path.exists(dst))
 
+    def test_device_node_mount(self):
+        # A device node made with mknod(2) outside devfs, like the Kubernetes
+        # HostPathType CharDevice/BlockDevice tests use. nullfs can't mount
+        # it, so ocijail gives the container a node of the same type,
+        # number, mode and owner, and removes it (restoring what was there)
+        # on delete.
+        with tempfile.TemporaryDirectory() as root_dir, \
+             tempfile.TemporaryDirectory(dir="/tmp") as d:
+            shutil.copytree("/rescue", os.path.join(root_dir, "rescue"))
+            os.makedirs(os.path.join(root_dir, "etc"))
+            kept = os.path.join(root_dir, "etc", "kept")
+            with open(kept, "w") as f:
+                f.write("image file")
+            chardev = os.path.join(d, "achardev")
+            blkdev = os.path.join(d, "ablkdev")
+            os.mknod(chardev, 0o640 | 0o020000, os.makedev(89, 1))
+            os.chown(chardev, 0, 5)
+            os.mknod(blkdev, 0o600 | 0o060000, os.makedev(89, 2))
+            c = self.config()
+            c["root"]["path"] = root_dir
+            c["mounts"] = [
+                {"destination": "/mnt/test/c", "type": "nullfs",
+                 "source": chardev},
+                {"destination": "/etc/kept", "type": "nullfs",
+                 "source": blkdev},
+            ]
+            c["process"]["args"] = [
+                "sh", "-c", "ls -ln /mnt/test/c /etc/kept"]
+            c["process"]["env"] = ["PATH=/rescue"]
+            try:
+                ret, out, err = self.run_with_config(c)
+                self.assertEqual(ret, 0, err)
+                lines = out.splitlines()
+                self.assertRegex(lines[0], r"^brw------- +1 0 +0 +89, +0x2 ")
+                self.assertRegex(lines[1], r"^crw-r----- +1 0 +5 +89, +0x1 ")
+            finally:
+                self.delete(False)
+            # the copy and the directories made for it are gone, and the
+            # image's file is back
+            self.assertFalse(os.path.exists(os.path.join(root_dir, "mnt")))
+            with open(kept) as f:
+                self.assertEqual(f.read(), "image file")
+
+            # A devfs device is refused: a copy would be inert, not the
+            # device.
+            c["mounts"] = [
+                {"destination": "/mnt/null", "type": "nullfs",
+                 "source": "/dev/null"},
+            ]
+            c["process"]["args"] = ["true"]
+            ret, _, _ = self.run_with_config(c, expected_ret=1)
+            self.assertEqual(ret, 1)
+            self.delete(False)
+            self.assertFalse(os.path.exists(os.path.join(root_dir, "mnt")))
+
     def test_process_user_umask(self):
         c = self.config()
         # If process.user.umask is set, this should be the value of umask inside

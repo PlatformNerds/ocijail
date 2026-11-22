@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -356,6 +357,125 @@ static void create_socket_node(const fs::path& path) {
     }
 }
 
+// A device node outside devfs (made with mknod(2) on a disk file system or
+// tmpfs) is inert: a device is reached only through devfs, so such a node is a
+// file with a type and a number. nullfs can't mount one, and the kernel can't
+// let it: in struct vnode, a device node's v_rdev shares a union with
+// v_mountedhere, so code that handles character devices would read the mount as
+// a cdev. Give the container a node of the same type, number, mode and owner
+// instead, the way regular files are copied when the kernel has no file mounts.
+// It isn't the same inode: a chmod(2) on either side doesn't show on the other.
+//
+// A device in devfs is refused: copying it into the container's root would give
+// an inert node, not the device. Runtimes expose host devices through devfs
+// rules (OCI linux.devices, CRI devices).
+static bool is_device_source(const json& mount) {
+    if (!mount.contains("source")) {
+        return false;
+    }
+    std::string source = mount["source"];
+    struct stat sb;
+    if (::stat(source.c_str(), &sb) < 0) {
+        return false;
+    }
+    if (!S_ISCHR(sb.st_mode) && !S_ISBLK(sb.st_mode)) {
+        return false;
+    }
+    struct statfs sfs;
+    if (::statfs(source.c_str(), &sfs) < 0) {
+        throw std::system_error(
+            errno, std::system_category(), "statfs " + source);
+    }
+    if (std::string_view{sfs.f_fstypename} == "devfs") {
+        throw std::runtime_error(
+            "mounting " + source +
+            ": a devfs device can't be bind-mounted; expose it with a devfs "
+            "rule (OCI linux.devices) instead");
+    }
+    return true;
+}
+
+static void copy_device_node(runtime_state& state,
+                             const fs::path& root_path,
+                             const fs::path& destination,
+                             const json& mount) {
+    std::string source = mount["source"];
+    struct stat src;
+    if (::stat(source.c_str(), &src) < 0) {
+        throw std::system_error(errno, std::system_category(), "stat " + source);
+    }
+    auto same = [&src](const struct stat& sb) {
+        return (sb.st_mode & S_IFMT) == (src.st_mode & S_IFMT) &&
+               sb.st_rdev == src.st_rdev &&
+               (sb.st_mode & ALLPERMS) == (src.st_mode & ALLPERMS) &&
+               sb.st_uid == src.st_uid && sb.st_gid == src.st_gid;
+    };
+
+    json entry = {{"destination", mount["destination"]},
+                  {"copy", destination.string()},
+                  {"saved", nullptr}};
+    struct stat dst;
+    if (::lstat(destination.c_str(), &dst) == 0) {
+        // With a read-only root, the prepare pass made the copy already and
+        // this pass sees it through the read-only alias.
+        if (same(dst)) {
+            return;
+        }
+        if (S_ISDIR(dst.st_mode)) {
+            throw std::runtime_error(
+                "destination for device node mount " + destination.string() +
+                " exists and is a directory");
+        }
+        auto [save_dir, save_path] = get_save_path(state, destination);
+        if (!fs::exists(save_dir)) {
+            fs::create_directories(save_dir);
+            state["remove_on_unmount"].push_back(save_dir);
+        }
+        fs::rename(destination, save_path);
+        entry["saved"] = save_path.string();
+    } else {
+        create_directories(root_path, destination.parent_path(), state);
+        state["remove_on_unmount"].push_back(destination);
+    }
+    if (::mknod(destination.c_str(), src.st_mode & (S_IFMT | ALLPERMS),
+                src.st_rdev) < 0) {
+        throw std::system_error(
+            errno, std::system_category(), "mknod " + destination.string());
+    }
+    // mknod(2) applies the umask.
+    if (::chmod(destination.c_str(), src.st_mode & ALLPERMS) < 0 ||
+        ::lchown(destination.c_str(), src.st_uid, src.st_gid) < 0) {
+        throw std::system_error(
+            errno, std::system_category(), "setting up " + destination.string());
+    }
+    state["device_copies"].push_back(entry);
+}
+
+// Undo copy_device_node for this mount, if it made a copy. Returns false if
+// the mount isn't a device node copy.
+static bool remove_device_copy(runtime_state& state, const json& mount) {
+    if (!state.contains("device_copies") || !mount.contains("destination")) {
+        return false;
+    }
+    for (auto& entry : state["device_copies"]) {
+        if (entry["destination"] != mount["destination"]) {
+            continue;
+        }
+        if (entry["saved"].is_string()) {
+            fs::path copy = entry["copy"].get<std::string>();
+            fs::path saved = entry["saved"].get<std::string>();
+            std::error_code ec;
+            fs::remove(copy, ec);
+            if (fs::exists(saved, ec)) {
+                fs::rename(saved, copy);
+            }
+        }
+        // Otherwise the copy is in remove_on_unmount.
+        return true;
+    }
+    return false;
+}
+
 static bool create_mount_point(runtime_state& state,
                                const fs::path& root_path,
                                const fs::path& destination,
@@ -423,6 +543,14 @@ static bool mount_volume(main_app& app,
     // it over a socket node (FreeBSD 15.1 needs the backport of 2c68ad49f13d).
     bool is_socket_mount =
         type == "nullfs" && fs::is_socket(mount["source"].get<std::string>());
+
+    // A device node outside devfs is copied, not mounted (see
+    // copy_device_node). The copy is made in the prepare pass when the root
+    // is read-only, since the second pass can't write to it.
+    if (type == "nullfs" && is_device_source(mount)) {
+        copy_device_node(state, root_path, destination, mount);
+        return file_mount_supported;
+    }
 
     // Validate mount options before we perform any actions
     std::vector<std::tuple<pseudo_option*, std::string>> pseudo_opts;
@@ -528,6 +656,10 @@ static void unmount_volume(main_app& app,
                            const fs::path& root_path,
                            const json& mount,
                            const json& recorded) {
+    if (remove_device_copy(state, mount)) {
+        return;
+    }
+
     // Prefer the path recorded at mount time (see mount_volumes); state
     // written by older versions does not have it.
     auto destination = recorded.is_string()
