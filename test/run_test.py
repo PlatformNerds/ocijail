@@ -472,8 +472,8 @@ class test_run(unittest.TestCase):
                 ret, out, err = self.run_with_config(c)
                 self.assertEqual(ret, 0, err)
                 lines = out.splitlines()
-                self.assertRegex(lines[0], r"^brw------- +1 0 +0 +89, +0x2 ")
-                self.assertRegex(lines[1], r"^crw-r----- +1 0 +5 +89, +0x1 ")
+                self.assertRegex(lines[0], r"^brw------- +1 0 +0 +0x5902 ")
+                self.assertRegex(lines[1], r"^crw-r----- +1 0 +5 +0x5901 ")
             finally:
                 self.delete(False)
             # the copy and the directories made for it are gone, and the
