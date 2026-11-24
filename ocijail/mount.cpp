@@ -204,6 +204,16 @@ static fs::path resolve_container_path_impl(main_app& app,
     for (const auto& element : path) {
         app.log_debug() << "resolved_path: " << resolved_path
                         << ", element: " << element;
+        // A trailing separator ("/data/", which Kubernetes allows for a
+        // volume's mountPath) iterates as a final empty element. Appending it
+        // would leave a trailing separator on the result, and that path is
+        // recorded for the unmount: unmount(2) matches it against the mount
+        // point the kernel stores, which has none, so it fails with EINVAL,
+        // the mount leaks and the kubelet can never unmount the volume (the
+        // pod stays Terminating). The same goes for "." elements.
+        if (element.empty() || element == ".") {
+            continue;
+        }
         if (element.is_absolute()) {
             resolved_path = root_path;
         } else {
@@ -665,6 +675,11 @@ static void unmount_volume(main_app& app,
     auto destination = recorded.is_string()
                            ? fs::path{recorded.get<std::string>()}
                            : resolve_container_path(app, root_path, mount);
+    // Paths recorded by versions that kept a mountPath's trailing separator
+    // (see resolve_container_path_impl) would not match the mount point.
+    while (!destination.has_filename() && destination.has_relative_path()) {
+        destination = destination.parent_path();
+    }
 
     // Whether the source is a file only matters without file mount support.
     // Don't stat it otherwise: for an NFS volume whose server is gone, stat(2)

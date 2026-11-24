@@ -716,6 +716,45 @@ class test_run(unittest.TestCase):
             # before we delete root_dir
             self.delete()
 
+    def test_mount_trailing_slash_unmounted(self):
+        # A destination with a trailing slash ("/data/", as a Kubernetes
+        # volume mountPath may have) must still be unmounted on delete, also
+        # after the runtime has (force-)unmounted the container's root file
+        # system, as CRI-O does when a container stops. The mount then has no
+        # path that resolves, and unmount(2) falls back to comparing the path
+        # string with the mount point the kernel stores: "/data/" did not
+        # match, the mount leaked and kept the volume busy for good.
+        with tempfile.TemporaryDirectory() as root_dir, \
+                tempfile.TemporaryDirectory() as src_dir:
+            root_dir = os.path.realpath(root_dir)
+            subprocess.run(["mount", "-t", "tmpfs", "tmpfs", root_dir],
+                           check=True)
+            try:
+                shutil.copytree("/rescue", os.path.join(root_dir, "rescue"))
+                c = self.config()
+                c["root"]["path"] = root_dir
+                c["process"]["args"] = ["sh", "-c", "echo x > /data/x"]
+                c["process"]["env"] = ["PATH=/rescue"]
+                c["mounts"] = [
+                    {
+                        "type": "nullfs",
+                        "destination": "/data/",
+                        "source": src_dir,
+                    },
+                ]
+                ret, out, _ = self.run_with_config(c)
+                self.assertEqual(ret, 0)
+                self.assertTrue(os.path.exists(os.path.join(src_dir, "x")))
+                subprocess.run(["umount", "-f", root_dir], check=True)
+                self.delete()
+                mounts = subprocess.run(["mount", "-p"], capture_output=True,
+                                        text=True, check=True).stdout
+                self.assertNotIn(os.path.join(root_dir, "data"), mounts)
+            finally:
+                for path in (os.path.join(root_dir, "data"), root_dir):
+                    subprocess.run(["umount", "-f", path],
+                                   capture_output=True)
+
     def test_readonly_root(self):
         # Running the container should not modify the root
         with tempfile.TemporaryDirectory() as root_dir:
